@@ -15,13 +15,16 @@ import {
 } from "@/lib/config";
 
 const STYLES = [
-  { id: "photo", label: "Photo", emoji: "📸", desc: "Photorealistic" },
-  { id: "illustration", label: "Art", emoji: "🎨", desc: "Digital art" },
-  { id: "logo", label: "Logo", emoji: "✦", desc: "Clean & minimal" },
-  { id: "avatar", label: "Avatar", emoji: "👤", desc: "Portrait style" },
+  { id: "photo", label: "Photo", emoji: "📸" },
+  { id: "illustration", label: "Art", emoji: "🎨" },
+  { id: "logo", label: "Logo", emoji: "✦" },
+  { id: "avatar", label: "Avatar", emoji: "👤" },
 ];
 
 type Stage = "idle" | "approving" | "paying" | "generating" | "done" | "error";
+
+// When no contract is deployed, skip wallet/payment and go straight to generation
+const CONTRACT_DEPLOYED = Boolean(PAYMENT_CONTRACT_ADDRESS);
 
 export default function Home() {
   const isMiniPay = useIsMiniPay();
@@ -46,69 +49,101 @@ export default function Home() {
 
   const isWrongNetwork = isConnected && chainId !== celo.id;
 
-  const generate = useCallback(async () => {
-    if (!prompt.trim() || !address) return;
-    setStage("idle");
+  const generateDirect = useCallback(async () => {
+    setStage("generating");
     setErrorMsg(null);
     setImageUrl(null);
 
+    const dummyRequestId = keccak256(encodePacked(["uint256"], [BigInt(Date.now())]));
+
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: prompt.trim(),
+        style,
+        requestId: dummyRequestId,
+        txHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      }),
+    });
+
+    if (!res.ok) {
+      const data = (await res.json()) as { error?: string };
+      throw new Error(data.error ?? "Generation failed");
+    }
+
+    const data = (await res.json()) as { imageUrl: string };
+    setImageUrl(data.imageUrl);
+    setStage("done");
+  }, [prompt, style]);
+
+  const generateOnChain = useCallback(async () => {
+    if (!address) return;
+
+    const newRequestId = keccak256(
+      encodePacked(["address", "uint256"], [address, BigInt(Date.now())])
+    );
+
+    setStage("approving");
+    const approveTx = await writeContractAsync({
+      address: CUSD_ADDRESS,
+      abi: CUSD_ABI,
+      functionName: "approve",
+      args: [PAYMENT_CONTRACT_ADDRESS!, IMAGE_PRICE_USDT],
+      chainId: celo.id,
+    });
+    setApproveTxHash(approveTx);
+    await new Promise((r) => setTimeout(r, 3000));
+
+    setStage("paying");
+    const payTx = await writeContractAsync({
+      address: PAYMENT_CONTRACT_ADDRESS!,
+      abi: PAYMENT_ABI,
+      functionName: "pay",
+      args: [newRequestId],
+      chainId: celo.id,
+    });
+    setPayTxHash(payTx);
+    await new Promise((r) => setTimeout(r, 5000));
+
+    setStage("generating");
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: prompt.trim(),
+        style,
+        requestId: newRequestId,
+        txHash: payTx,
+      }),
+    });
+
+    if (!res.ok) {
+      const data = (await res.json()) as { error?: string };
+      throw new Error(data.error ?? "Generation failed");
+    }
+
+    const data = (await res.json()) as { imageUrl: string };
+    setImageUrl(data.imageUrl);
+    setStage("done");
+  }, [prompt, style, address, writeContractAsync]);
+
+  const generate = useCallback(async () => {
+    if (!prompt.trim()) return;
+    setErrorMsg(null);
+
     try {
-      const newRequestId = keccak256(
-        encodePacked(["address", "uint256"], [address, BigInt(Date.now())])
-      );
-
-      // Step 1: Approve USDT spend
-      setStage("approving");
-      const spender = PAYMENT_CONTRACT_ADDRESS || CUSD_ADDRESS;
-      const approveTx = await writeContractAsync({
-        address: CUSD_ADDRESS,
-        abi: CUSD_ABI,
-        functionName: "approve",
-        args: [spender, IMAGE_PRICE_USDT],
-        chainId: celo.id,
-      });
-      setApproveTxHash(approveTx);
-      await new Promise((r) => setTimeout(r, 3000));
-
-      // Step 2: Call payment contract
-      setStage("paying");
-      const payTx = await writeContractAsync({
-        address: PAYMENT_CONTRACT_ADDRESS || CUSD_ADDRESS,
-        abi: PAYMENT_ABI,
-        functionName: "pay",
-        args: [newRequestId],
-        chainId: celo.id,
-      });
-      setPayTxHash(payTx);
-      await new Promise((r) => setTimeout(r, 5000));
-
-      // Step 3: Generate image
-      setStage("generating");
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: prompt.trim(),
-          style,
-          requestId: newRequestId,
-          txHash: payTx,
-        }),
-      });
-
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        throw new Error(data.error ?? "Generation failed");
+      if (!CONTRACT_DEPLOYED) {
+        await generateDirect();
+      } else {
+        await generateOnChain();
       }
-
-      const data = (await res.json()) as { imageUrl: string };
-      setImageUrl(data.imageUrl);
-      setStage("done");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
       setErrorMsg(msg);
       setStage("error");
     }
-  }, [prompt, style, address, writeContractAsync]);
+  }, [prompt, generateDirect, generateOnChain]);
 
   const reset = () => {
     setStage("idle");
@@ -125,10 +160,13 @@ export default function Home() {
   };
 
   const isProcessing = stage === "approving" || stage === "paying" || stage === "generating";
-
   const stageIndex = (s: Stage) =>
     ["idle", "approving", "paying", "generating", "done", "error"].indexOf(s);
   const currentIndex = stageIndex(stage);
+
+  // Without contract: no wallet needed
+  const needsWallet = CONTRACT_DEPLOYED;
+  const canGenerate = prompt.trim().length > 0 && (!needsWallet || (isConnected && !isWrongNetwork));
 
   return (
     <main className="min-h-screen flex flex-col max-w-md mx-auto px-4 pt-6 pb-10">
@@ -140,22 +178,24 @@ export default function Home() {
           </h1>
           <p className="text-xs text-zinc-500 mt-0.5">AI Image Studio · 0.05 USDT/image</p>
         </div>
-        {!isConnected ? (
-          <button
-            onClick={handleConnect}
-            className="text-sm px-4 py-2 rounded-xl bg-[#35D07F] text-black font-semibold"
-          >
-            Connect
-          </button>
-        ) : (
-          <div className="text-right">
-            <div className="text-xs text-zinc-400 font-mono">
-              {address?.slice(0, 6)}…{address?.slice(-4)}
+        {needsWallet && (
+          !isConnected ? (
+            <button
+              onClick={handleConnect}
+              className="text-sm px-4 py-2 rounded-xl bg-[#35D07F] text-black font-semibold"
+            >
+              Connect
+            </button>
+          ) : (
+            <div className="text-right">
+              <div className="text-xs text-zinc-400 font-mono">
+                {address?.slice(0, 6)}…{address?.slice(-4)}
+              </div>
+              {isWrongNetwork && (
+                <div className="text-xs text-red-400 mt-0.5">Wrong network</div>
+              )}
             </div>
-            {isWrongNetwork && (
-              <div className="text-xs text-red-400 mt-0.5">Wrong network</div>
-            )}
-          </div>
+          )
         )}
       </header>
 
@@ -201,13 +241,15 @@ export default function Home() {
       {/* Price */}
       <div className="flex items-center justify-between mb-5 px-1">
         <span className="text-xs text-zinc-500">No subscription needed</span>
-        <span className="text-sm font-semibold text-white">
-          0.05 <span className="text-[#35D07F]">USDT</span>
-        </span>
+        {CONTRACT_DEPLOYED && (
+          <span className="text-sm font-semibold text-white">
+            0.05 <span className="text-[#35D07F]">USDT</span>
+          </span>
+        )}
       </div>
 
       {/* CTA */}
-      {!isConnected ? (
+      {needsWallet && !isConnected ? (
         <button
           onClick={handleConnect}
           className="w-full py-4 rounded-2xl bg-[#35D07F] text-black font-bold text-base"
@@ -224,10 +266,10 @@ export default function Home() {
       ) : !isProcessing ? (
         <button
           onClick={generate}
-          disabled={!prompt.trim() || isWrongNetwork}
+          disabled={!canGenerate}
           className="w-full py-4 rounded-2xl bg-[#35D07F] text-black font-bold text-base disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
         >
-          Generate Image · 0.05 USDT
+          {CONTRACT_DEPLOYED ? "Generate Image · 0.05 USDT" : "Generate Image"}
         </button>
       ) : null}
 
@@ -244,20 +286,24 @@ export default function Home() {
       {/* Progress */}
       {isProcessing && (
         <div className="mt-6 space-y-3">
-          <Step
-            done={currentIndex > stageIndex("approving")}
-            active={stage === "approving"}
-            label="Approving USDT spend"
-          />
-          <Step
-            done={currentIndex > stageIndex("paying")}
-            active={stage === "paying"}
-            label="Confirming payment on Celo"
-          />
+          {CONTRACT_DEPLOYED && (
+            <>
+              <Step
+                done={currentIndex > stageIndex("approving")}
+                active={stage === "approving"}
+                label="Approving USDT spend"
+              />
+              <Step
+                done={currentIndex > stageIndex("paying")}
+                active={stage === "paying"}
+                label="Confirming payment on Celo"
+              />
+            </>
+          )}
           <Step
             done={currentIndex > stageIndex("generating")}
             active={stage === "generating"}
-            label="Generating your image"
+            label="Generating your image…"
           />
           <div className="pt-2 text-center">
             <div className="inline-block w-6 h-6 border-2 border-[#35D07F] border-t-transparent rounded-full animate-spin" />
