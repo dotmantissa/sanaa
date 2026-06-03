@@ -8,19 +8,52 @@ const publicClient = createPublicClient({
   transport: http("https://forno.celo.org"),
 });
 
-const STYLE_SUFFIXES: Record<string, string> = {
+const STYLE_PROMPTS: Record<string, string> = {
   photo: "photorealistic, high quality photography, professional lighting",
-  illustration: "digital illustration, vibrant colors, artistic, detailed",
-  logo: "minimal logo design, clean vector style, professional, white background",
-  avatar: "portrait avatar, professional headshot, detailed face, studio lighting",
+  illustration: "digital illustration, vibrant colors, artistic, detailed painting",
+  logo: "minimalist logo, clean vector graphic, flat design, white background, centered",
+  avatar: "professional portrait headshot, studio lighting, detailed facial features",
 };
 
-function buildPollinationsUrl(prompt: string, style: string): string {
-  const suffix = STYLE_SUFFIXES[style] ?? STYLE_SUFFIXES.photo;
-  const encoded = encodeURIComponent(`${prompt}, ${suffix}`);
-  const seed = Math.floor(Math.random() * 1_000_000);
-  // The browser fetches this URL directly — generation happens on GET, not HEAD
-  return `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&model=flux&nologo=true`;
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function generateImage(prompt: string, style: string): Promise<string> {
+  const suffix = STYLE_PROMPTS[style] ?? STYLE_PROMPTS.photo;
+  const fullPrompt = `${prompt}, ${suffix}`;
+
+  const res = await fetch(
+    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.HF_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        inputs: fullPrompt,
+        parameters: { num_inference_steps: 4, guidance_scale: 3.5 },
+      }),
+    },
+  );
+
+  if (res.status === 503) {
+    throw new Error("Model is warming up — please try again in 30 seconds");
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Generation failed: ${res.status}`);
+  }
+
+  const buf = await res.arrayBuffer();
+  return `data:image/jpeg;base64,${arrayBufferToBase64(buf)}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -40,7 +73,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Prompt too long" }, { status: 400 });
     }
 
-    // Verify payment on-chain when contract is deployed
     if (PAYMENT_CONTRACT_ADDRESS) {
       const hasPaid = await publicClient.readContract({
         address: PAYMENT_CONTRACT_ADDRESS,
@@ -48,18 +80,15 @@ export async function POST(req: NextRequest) {
         functionName: "hasPaid",
         args: [requestId as `0x${string}`],
       });
-
       if (!hasPaid) {
         return NextResponse.json({ error: "Payment not found on-chain" }, { status: 402 });
       }
     }
 
-    const imageUrl = buildPollinationsUrl(prompt, style ?? "photo");
-
+    const imageUrl = await generateImage(prompt, style ?? "photo");
     return NextResponse.json({ imageUrl });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Generation failed";
-    console.error("Generation error:", error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
