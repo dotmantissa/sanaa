@@ -15,20 +15,12 @@ const STYLE_SUFFIXES: Record<string, string> = {
   avatar: "portrait avatar, professional headshot, detailed face, studio lighting",
 };
 
-async function generateWithPollinations(prompt: string, style: string): Promise<string> {
+function buildPollinationsUrl(prompt: string, style: string): string {
   const suffix = STYLE_SUFFIXES[style] ?? STYLE_SUFFIXES.photo;
-  const fullPrompt = `${prompt}, ${suffix}`;
-  const encoded = encodeURIComponent(fullPrompt);
+  const encoded = encodeURIComponent(`${prompt}, ${suffix}`);
   const seed = Math.floor(Math.random() * 1_000_000);
-
-  // Pollinations returns the image directly at this URL — no API key needed
-  const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&model=flux&nologo=true`;
-
-  // Verify the URL resolves to an actual image before returning
-  const check = await fetch(url, { method: "HEAD" });
-  if (!check.ok) throw new Error("Image generation failed");
-
-  return url;
+  // The browser fetches this URL directly — generation happens on GET, not HEAD
+  return `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&model=flux&nologo=true`;
 }
 
 export async function POST(req: NextRequest) {
@@ -62,7 +54,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const imageUrl = await generateWithPollinations(prompt, style ?? "photo");
+    const imageUrl = buildPollinationsUrl(prompt, style ?? "photo");
 
     return NextResponse.json({ imageUrl });
   } catch (error) {

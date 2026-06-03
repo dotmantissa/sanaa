@@ -311,16 +311,18 @@ export default function Home() {
         </div>
       )}
 
-      {/* Result */}
+      {/* Result — image loads directly from Pollinations (can take ~15s) */}
       {stage === "done" && imageUrl && (
         <div className="mt-6 space-y-4">
-          <div className="rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800">
+          <div className="rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 relative">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={imageUrl}
               alt="Generated image"
               className="w-full aspect-square object-cover"
+              onError={() => setErrorMsg("Image failed to load — try again")}
             />
+            <div className="shimmer absolute inset-0 aspect-square -z-10" />
           </div>
           <div className="flex gap-3">
             <a
