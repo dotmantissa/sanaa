@@ -8,39 +8,26 @@ const publicClient = createPublicClient({
   transport: http("https://forno.celo.org"),
 });
 
-async function generateWithFal(prompt: string, style: string): Promise<string> {
-  const stylePrompts: Record<string, string> = {
-    photo: "photorealistic, high quality photography, professional",
-    illustration: "digital illustration, vibrant colors, artistic",
-    logo: "minimal logo design, clean, professional, vector style",
-    avatar: "portrait avatar, professional headshot style, detailed face",
-  };
+const STYLE_SUFFIXES: Record<string, string> = {
+  photo: "photorealistic, high quality photography, professional lighting",
+  illustration: "digital illustration, vibrant colors, artistic, detailed",
+  logo: "minimal logo design, clean vector style, professional, white background",
+  avatar: "portrait avatar, professional headshot, detailed face, studio lighting",
+};
 
-  const enhancedPrompt = `${prompt}, ${stylePrompts[style] ?? stylePrompts.photo}`;
+async function generateWithPollinations(prompt: string, style: string): Promise<string> {
+  const suffix = STYLE_SUFFIXES[style] ?? STYLE_SUFFIXES.photo;
+  const fullPrompt = `${prompt}, ${suffix}`;
+  const encoded = encodeURIComponent(fullPrompt);
+  const seed = Math.floor(Math.random() * 1_000_000);
 
-  const response = await fetch("https://fal.run/fal-ai/fast-sdxl", {
-    method: "POST",
-    headers: {
-      Authorization: `Key ${process.env.FAL_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      prompt: enhancedPrompt,
-      negative_prompt: "blurry, low quality, distorted, ugly",
-      image_size: "square_hd",
-      num_inference_steps: 4,
-      num_images: 1,
-    }),
-  });
+  // Pollinations returns the image directly at this URL — no API key needed
+  const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&model=flux&nologo=true`;
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Fal.ai error: ${err}`);
-  }
+  // Verify the URL resolves to an actual image before returning
+  const check = await fetch(url, { method: "HEAD" });
+  if (!check.ok) throw new Error("Image generation failed");
 
-  const data = (await response.json()) as { images: { url: string }[] };
-  const url = data?.images?.[0]?.url;
-  if (!url) throw new Error("No image returned from Fal.ai");
   return url;
 }
 
@@ -61,7 +48,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Prompt too long" }, { status: 400 });
     }
 
-    // Verify payment on-chain
+    // Verify payment on-chain when contract is deployed
     if (PAYMENT_CONTRACT_ADDRESS) {
       const hasPaid = await publicClient.readContract({
         address: PAYMENT_CONTRACT_ADDRESS,
@@ -75,7 +62,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const imageUrl = await generateWithFal(prompt, style ?? "photo");
+    const imageUrl = await generateWithPollinations(prompt, style ?? "photo");
 
     return NextResponse.json({ imageUrl });
   } catch (error) {
